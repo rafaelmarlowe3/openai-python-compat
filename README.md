@@ -1,29 +1,65 @@
 # OpenAI Python SDK compatibility examples
 
-This repository shows how the official OpenAI Python package can target an OpenAI-compatible endpoint for chat, Responses, and images, while using httpx for a native asynchronous video contract. It is not the OpenAI SDK. **[ArgoLink](https://argolink.io/gh-openai-python-compat) is the configured compatible base example.** Last checked: 2026-10-07.
+This independent cookbook shows where the official OpenAI Python package fits when an application targets an OpenAI-compatible service. It is not the OpenAI SDK, and it is not affiliated with OpenAI, ArgoLink, or a model vendor. **[ArgoLink](https://argolink.io/gh-openai-python-compat)** is the compatible base used in the examples. Last checked: 2026-10-07.
 
 ## Install and configure
 
-Install a pinned openai package in your application and set OPENAI_API_KEY. Set OPENAI_BASE_URL to https://argolink.io/v1 unless your chosen service documents another root. The SDK appends endpoint paths; inspect the version's request trace before changing the root. The examples never contain a real key.
+```bash
+python -m venv .venv && . .venv/bin/activate
+python -m pip install --upgrade openai httpx
+export OPENAI_API_KEY='replace-me'
+export OPENAI_BASE_URL='https://argolink.io/v1'
+export TEXT_MODEL='gpt-5.4'
+export IMAGE_MODEL='gpt-image-2'
+```
 
-examples/client.py exposes three functions. chat uses chat.completions, response uses Responses, and image uses images.generate. Model IDs are environment overrides but must exist in the target catalog. Chat and Responses are different request/response contracts; do not assume a model supporting one supports the other.
+`examples/client.py` is import-safe: the OpenAI clients are created only when a function is called. It sets `max_retries=0` so the SDK cannot silently replay a generation request. The caller owns retry policy and should retry only an idempotent read or a provider-supported idempotency key.
 
-## Video boundary
+```python
+from examples.client import chat, image, response
 
-OpenAI's SDK image and text helpers do not make a provider's video API magically compatible. examples/video_httpx.py uses httpx to POST /videos/generations, persist request_id, poll /videos/{id}, and stop on a terminal status. It sends a User-Agent. Add content download after done and preserve failed/expired responses. A POST timeout is ambiguous; do not blindly call it again.
+reply = chat("Give one sentence about request IDs")
+print(reply.choices[0].message.content)
+print(response("Return one short checklist").output_text)
+image_result = image("A blue paper boat on a white desk")
+```
 
-## Streaming, async, and errors
+The live catalog is authoritative for exact IDs and endpoint support. `gpt-5.4` currently uses the Responses family in the catalog; the example keeps `chat()` available for models that document Chat Completions. Do not infer that a model supports both endpoints from its name.
 
-For a streaming chat call, iterate the SDK stream and record the final response. For async, use AsyncOpenAI with the same base and key; close the client on shutdown. Catch authentication, rate limit, timeout, and bad request errors separately. The SDK's retry setting must not replay a side-effecting video POST. Redact Authorization and signed media URLs from logs.
+## Streaming and async
 
-## Model facts and prices
+For chat streaming, call `chat(prompt, stream=True)` and consume every chunk before closing your application client. For asynchronous applications, `async_client()` returns `AsyncOpenAI`; use it inside an async context and close it during shutdown. Record the final response ID and usage. Never log `Authorization`, user prompts, or signed media URLs.
 
-The live catalog/model page is authoritative for IDs, context, output, tools, image sizes, and effective rates. This README avoids a copied price table because it would become stale. For Seedance 2.5, use its native video page and the documented 4–30 second contract. For gpt-image-2, verify size/quality and reference limits. Keep official and effective prices in separate dated fields.
+## Video is a different contract
 
-## Checks
+The OpenAI SDK text and image helpers do not turn a provider's video API into an OpenAI endpoint. `examples/video_httpx.py` deliberately uses `httpx` and exposes three explicit steps:
 
-python3 -m unittest discover -s tests checks source boundaries offline. The examples are not executed against a provider here. Before deployment, run a small schema test and capture the SDK version. Use a neutral environment variable and add a User-Agent to any urllib client.
+```python
+from examples.video_httpx import download_video, poll_video, submit_video
 
-## FAQ
+request_id = submit_video("A paper boat crossing a rainy puddle")
+result = poll_video(request_id, interval=5, deadline=600)
+download_video(request_id, "output.mp4")
+```
 
-**Can I use the SDK for video?** Use httpx and the native video contract shown here. **Why does the base end at /v1?** The SDK appends its endpoint path. **Are retries safe?** Only for an idempotent read or a provider-supported idempotency key. **Why are model IDs variables?** Catalogs change; verify them before launch.
+The flow is `POST /v1/videos/generations`, poll `GET /v1/videos/{request_id}`, then download `GET /v1/videos/{request_id}/content`. Only `pending` is non-terminal; terminal statuses are `done`, `failed`, and `expired`. A failed or expired job is surfaced as an exception. A timeout after POST is ambiguous, so persist the request ID before deciding whether to retry. The example sets a descriptive `User-Agent`, follows no redirects, validates duration, and makes no request at import time.
+
+## Request and error boundaries
+
+| Symptom | Check first | Safe action |
+| --- | --- | --- |
+| 401 | environment key and account | redact the header; do not paste it into an issue |
+| 400 | exact model, endpoint family, body fields | compare with the dated model page |
+| 404 | duplicated or missing `/v1` | inspect the SDK request URL |
+| 429 / 503 | rate limit or capacity | honor `Retry-After`; avoid replaying a write |
+| stream ends early | final response and client log | preserve request ID and usage before retry |
+
+Use `https://argolink.io/v1` only as a base URL. The SDK appends its route. For current IDs, limits, image fields, and prices, re-read [GET /v1/models](https://argolink.io/v1/models), the [GPT-5.4 page](https://argolink.io/en/models/gpt-5-4), and the [gpt-image-2 page](https://argolink.io/en/models/gpt-image-2) on the day of deployment. This README intentionally avoids a copied price table.
+
+## Tests
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+Tests inspect the source and local validation only; they never send a billable request. Keep production adapters, keys, timeouts, and any retry queue outside this public repository.
